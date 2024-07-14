@@ -1,0 +1,6 @@
+ib_insync
+pandas
+ta-lib
+pyarrow
+psycopg2
+selenium
