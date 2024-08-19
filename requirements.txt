@@ -1,6 +1,9 @@
-ib_insync
+yfinance
 pandas
 ta-lib
 pyarrow
 psycopg2
 selenium
+SQLAlchemy
+alpaca-trade-api
+argparse
