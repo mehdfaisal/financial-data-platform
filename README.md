@@ -20,7 +20,7 @@ The Git repository for the project was set up and can be accessed [here](https:/
 
 2. **Installed Required Libraries:**
     ```sh
-    pip install ib_insync pandas ta-lib pyarrow psycopg2 selenium
+    pip install yfinance pandas ta-lib SQLAlchemy alpaca-trade-api argparse quantstats ipython pyarrow psycopg2 selenium
     ```
 
 ### 3. Setting Up PostgreSQL
@@ -67,5 +67,30 @@ The Git repository for the project was set up and can be accessed [here](https:/
     );
     ```
 
+5. ## Fixing QuantStats `numpy.product` Error
 
+If you encounter an `AttributeError` due to `numpy.product` when using QuantStats, follow these steps to resolve it:
 
+i. **Locate the `stats.py` file:**
+   - Navigate to the QuantStats installation directory, which is typically located within your Python environment's site-packages directory. The path might look something like this:
+     ```
+     C:\Users\<YourUsername>\AppData\Local\Programs\Python\Python312\Lib\site-packages\quantstats
+     ```
+   - Replace `<YourUsername>` with your actual Windows username.
+
+ii. **Edit the `stats.py` file:**
+   - Open `stats.py` with a text editor.
+   - Search for the line containing `numpy.product`.
+   - Replace `numpy.product` with `numpy.prod`:
+     ```python
+     return _np.prod(1 + returns) ** (1 / len(returns)) - 1
+     ```
+
+iii. **Save the changes:**
+   - Save the file and close the text editor.
+
+iv. **Alternative: Update QuantStats:**
+   - Consider updating QuantStats to the latest version using pip:
+     ```sh
+     pip install --upgrade quantstats
+     ```
