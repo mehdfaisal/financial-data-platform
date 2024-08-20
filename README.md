@@ -1,7 +1,7 @@
 # Financial Data Platform
 
 ## Project Overview
- The purpose of this project is to develop a system for ingesting real-time and historical data from IBKR, aggregating it, creating backtest strategies based on various indicators, integrating with Schwab for paper and live trading, and developing a user interface for interaction.
+ The purpose of this project is to develop a system for ingesting real-time and historical data from Alpaca and Yahoo finance respectively, aggregating it, creating backtest strategies based on various indicators, integrating with Schwab for paper and live trading, and developing a user interface for interaction.
 
 
 ## Setup Process and Initial Configuration Steps
@@ -74,9 +74,9 @@ If you encounter an `AttributeError` due to `numpy.product` when using QuantStat
 i. **Locate the `stats.py` file:**
    - Navigate to the QuantStats installation directory, which is typically located within your Python environment's site-packages directory. The path might look something like this:
      ```
-     C:\Users\<YourUsername>\AppData\Local\Programs\Python\Python312\Lib\site-packages\quantstats
+     C:\Users\<YourUsername>\AppData\Local\Programs\Python\<YourPythonVersion>\Lib\site-packages\quantstats
      ```
-   - Replace `<YourUsername>` with your actual Windows username.
+   - Replace `<YourUsername>` with your actual Windows username. And `<YourPythonVersion>` with your python version
 
 ii. **Edit the `stats.py` file:**
    - Open `stats.py` with a text editor.
@@ -90,7 +90,7 @@ iii. **Save the changes:**
    - Save the file and close the text editor.
 
 iv. **Alternative: Update QuantStats:**
-   - Consider updating QuantStats to the latest version using pip:
+   - You could also consider updating QuantStats to the latest version using pip:
      ```sh
      pip install --upgrade quantstats
      ```
