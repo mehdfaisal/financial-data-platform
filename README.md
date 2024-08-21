@@ -1,7 +1,7 @@
 # Financial Data Platform
 
 ## Project Overview
- The purpose of this project is to develop a system for ingesting real-time and historical data from IBKR, aggregating it, creating backtest strategies based on various indicators, integrating with Schwab for paper and live trading, and developing a user interface for interaction.
+ The purpose of this project is to develop a system for ingesting real-time and historical data from Alpaca and Yahoo finance respectively, aggregating it, creating backtest strategies based on various indicators, integrating with Schwab for paper and live trading, and developing a user interface for interaction.
 
 
 ## Setup Process and Initial Configuration Steps
@@ -20,7 +20,7 @@ The Git repository for the project was set up and can be accessed [here](https:/
 
 2. **Installed Required Libraries:**
     ```sh
-    pip install ib_insync pandas ta-lib pyarrow psycopg2 selenium
+    pip install yfinance pandas ta-lib SQLAlchemy alpaca-trade-api argparse quantstats ipython pyarrow psycopg2 selenium
     ```
 
 ### 3. Setting Up PostgreSQL
@@ -67,46 +67,30 @@ The Git repository for the project was set up and can be accessed [here](https:/
     );
     ```
 
-### 4. Fetching Historical Data
+5. ## Fixing QuantStats `numpy.product` Error
 
-A basic script was written to connect to IBKR and fetch historical data. Below is the sample script used:
+If you encounter an `AttributeError` due to `numpy.product` when using QuantStats, follow these steps to resolve it:
 
-```python
-import ib_insync
-import pandas as pd
-from common import save_to_postgresql
+i. **Locate the `stats.py` file:**
+   - Navigate to the QuantStats installation directory, which is typically located within your Python environment's site-packages directory. The path might look something like this:
+     ```
+     C:\Users\<YourUsername>\AppData\Local\Programs\Python\<YourPythonVersion>\Lib\site-packages\quantstats
+     ```
+   - Replace `<YourUsername>` with your actual Windows username. And `<YourPythonVersion>` with your python version
 
-def connect_to_ibkr():
-    ib = ib_insync.IB()
-    ib.connect('127.0.0.1', 7497, clientId=1)
-    return ib
+ii. **Edit the `stats.py` file:**
+   - Open `stats.py` with a text editor.
+   - Search for the line containing `numpy.product`.
+   - Replace `numpy.product` with `numpy.prod`:
+     ```python
+     return _np.prod(1 + returns) ** (1 / len(returns)) - 1
+     ```
 
-def fetch_historical_data_ibkr(symbol):
-    ib = connect_to_ibkr()
-    contract = ib_insync.Stock(symbol, 'SMART', 'USD')
-    
-    end_date = pd.Timestamp.now()
-    start_date = end_date - pd.DateOffset(months=5)
-    
-    bars = ib.reqHistoricalData(
-        contract,
-        endDateTime=end_date,
-        durationStr='5 M',
-        barSizeSetting='5 mins',
-        whatToShow='TRADES',
-        useRTH=True
-    )
-    
-    ib.disconnect()
-    
-    df = pd.DataFrame(bars)
-    return df
+iii. **Save the changes:**
+   - Save the file and close the text editor.
 
-def main():
-    symbols = ['AAPL', 'MSFT', 'GOOGL']
-    for symbol in symbols:
-        df = fetch_historical_data_ibkr(symbol)
-        save_to_postgresql(df, 'ohlcv', 'financial_data', 'your_username', 'your_password', 'localhost')
-
-if __name__ == "__main__":
-    main()
+iv. **Alternative: Update QuantStats:**
+   - You could also consider updating QuantStats to the latest version using pip:
+     ```sh
+     pip install --upgrade quantstats
+     ```
