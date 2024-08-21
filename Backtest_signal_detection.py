@@ -1,15 +1,24 @@
+##!/usr/bin/env python3
+
 import logging
-import time
 import configparser
 import yfinance as yf
-import psycopg2
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import argparse
 import math
 import pandas as pd
+import os
+import quantstats as qs
+from functools import lru_cache
+import platform
+
+# Ensure the log file exists
+log_file_path = 'backtesting_signals.log'
+if not os.path.exists(log_file_path):
+    with open(log_file_path, 'w') as f:
+        pass
 
 # Set up logging configuration
-log_file_path = 'C:\\Users\\faisa\\Downloads\\trading_script\\backtesting_signals.log'
 logging.basicConfig(
     filename=log_file_path,
     level=logging.INFO,
@@ -18,33 +27,31 @@ logging.basicConfig(
 
 # Load general config
 config = configparser.ConfigParser()
-config.read('C:\\Users\\faisa\\Downloads\\config.ini')
+config.read('config.ini')
 
-DB_NAME = config.get('PostgreSQL', 'DB_NAME')
-DB_USER = config.get('PostgreSQL', 'DB_USER')
-DB_PASSWORD = config.get('PostgreSQL', 'DB_PASSWORD')
-DB_HOST = config.get('PostgreSQL', 'DB_HOST')
-DB_PORT = config.get('PostgreSQL', 'DB_PORT')
+# Load date config for cross-platform compatibility
+config_dir = os.path.dirname(os.path.abspath(__file__))
+dates_ini_path = os.path.join(config_dir, 'dates.ini')
+config.read(dates_ini_path)
 
-# Load date config
-config.read('C:\\Users\\faisa\\projects\\financial-data-platform\\dates.ini')
 default_start_date = config.get('Dates', 'start_date')
 default_end_date = config.get('Dates', 'end_date')
 
-# Parse command-line arguments for backtesting
-parser = argparse.ArgumentParser(description='Backtesting Script')
+# Parse command-line arguments for backtesting and live trading
+parser = argparse.ArgumentParser(description='Trading Script')
 parser.add_argument('--start_date', type=str, default=default_start_date, help='Start date for backtesting (YYYY-MM-DD)')
 parser.add_argument('--end_date', type=str, default=default_end_date, help='End date for backtesting (YYYY-MM-DD)')
-parser.add_argument('--max_positions', type=int, default=None, help='Maximum number of positions')
+parser.add_argument('--max_positions', type=int, default=1, help='Maximum number of positions')
 parser.add_argument('--sort_by', type=str, default=None, help='Sort positions by (max_price, max_high, etc.)')
 parser.add_argument('--entry_conditions', type=str, default='moving_average', help='Entry conditions (comma-separated)')
 parser.add_argument('--exit_conditions', type=str, default='', help='Exit conditions (comma-separated)')
 parser.add_argument('--strategy', type=str, default=None, help='Intraday or daily strategy')
 parser.add_argument('--equity_usage', type=float, default=1, help='Percentage of equity to use (0 to 100)')
 parser.add_argument('--limit_percent', type=float, default=None, help='Percent from close price for limit order')
+parser.add_argument('--order_type', type=str, choices=['market', 'limit'], default='market', help='Order type: market or limit')
+parser.add_argument('--mode', type=str, choices=['backtest', 'livetrade', 'simtrade'], default='backtest', help='Mode: backtest, livetrade, or simtrade')
 args = parser.parse_args()
 
-# Variables
 start_date = args.start_date
 end_date = args.end_date
 max_positions = args.max_positions
@@ -54,69 +61,24 @@ exit_conditions = args.exit_conditions.split(',') if args.exit_conditions else [
 strategy = args.strategy
 equity_usage = args.equity_usage / 100
 limit_percent = args.limit_percent
+order_type = args.order_type
+mode = args.mode
 
-def adjust_date_range(start_date, end_date):
-    current_date = datetime.now()
-    logging.info(f'Current date: {current_date}')
-    if (current_date - datetime.strptime(start_date, '%Y-%m-%d')).days > 30:
-        start_date = (current_date - timedelta(days=30)).strftime('%Y-%m-%d')
-        logging.info(f'Adjusted start_date to be within the last 30 days: {start_date}')
-    if (current_date - datetime.strptime(end_date, '%Y-%m-%d')).days > 30:
-        end_date = current_date.strftime('%Y-%m-%d')
-        logging.info(f'Adjusted end_date to be within the same day: {end_date}')
-    if datetime.strptime(end_date, '%Y-%m-%d') > current_date:
-        end_date = current_date.strftime('%Y-%m-%d')
-        logging.info(f'Adjusted end_date since it was in the future: {end_date}')
-    return start_date, end_date
-
-start_date, end_date = adjust_date_range(start_date, end_date)
-
-def save_to_postgres(ticker, signal, price, event_time, order_type=None, order_id=None, quantity=None, equity_used=None, trigger_condition=None, error_message=None):
+@lru_cache(maxsize=32)
+def fetch_historical_data(ticker, start_date, end_date):
     try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cursor = conn.cursor()
-        if not isinstance(event_time, datetime):
-            event_time = pd.to_datetime(event_time)
-        event_time_str = event_time.strftime('%Y-%m-%d %H:%M:%S')
-        cursor.execute("""
-            INSERT INTO trading_log (ticker, signal, price, event_time, order_type, order_id, quantity, equity_used, trigger_condition, error_message)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, (ticker, signal, round(float(price)), event_time_str, order_type, order_id, quantity, equity_used, trigger_condition, error_message))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        historical_data = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+        if historical_data.empty:
+            logging.error(f'No historical data available for {ticker} from {start_date} to {end_date}')
+            return None
+        historical_data['moving_average'] = calculate_sma(historical_data, 20)
+        historical_data['atr'] = calculate_atr(historical_data, 14)
+        historical_data['natr'] = calculate_natr(historical_data)
+        logging.info(f'Fetched historical data for {ticker}: {historical_data.index[-1]}')
+        return historical_data
     except Exception as e:
-        logging.error(f'Error saving to PostgreSQL: {e}')
-
-def save_intraday_data_to_postgres(ticker, historical_data):
-    try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        cursor = conn.cursor()
-        for timestamp, row in historical_data.iterrows():
-            if not isinstance(timestamp, datetime):
-                timestamp = pd.to_datetime(timestamp)
-            timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
-            cursor.execute("""
-                INSERT INTO intraday_data (ticker, timestamp, open, high, low, close, volume)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (ticker, timestamp_str, round(row['Open']), round(row['High']), round(row['Low']), round(row['Close']), round(row['Volume'])))
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        logging.error(f'Error saving intraday data for {ticker} to PostgreSQL: {e}')
+        logging.error(f'Error fetching historical data for {ticker}: {e}')
+        return None
 
 def calculate_sma(data, window):
     return data['Close'].rolling(window=window).mean()
@@ -125,8 +87,7 @@ def calculate_atr(data, window):
     high_low = data['High'] - data['Low']
     high_close = abs(data['High'] - data['Close'].shift())
     low_close = abs(data['Low'] - data['Close'].shift())
-    ranges = high_low.to_frame('hl').join(high_close.to_frame('hc')).join(low_close.to_frame('lc'))
-    true_range = ranges.max(axis=1)
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = true_range.rolling(window=window).mean()
     return atr
 
@@ -134,31 +95,32 @@ def calculate_natr(data):
     high = data['High']
     low = data['Low']
     close = data['Close']
-    tr = pd.DataFrame()
-    tr['h-l'] = high - low
-    tr['h-pc'] = abs(high - close.shift(1))
-    tr['l-pc'] = abs(low - close.shift(1))
-    tr['tr'] = tr[['h-l', 'h-pc', 'l-pc']].max(axis=1)
-    atr = tr['tr'].rolling(window=14).mean()
+    true_range = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
+    atr = true_range.rolling(window=14).mean()
     natr = (atr / close) * 100
+
+    if natr.isnull().any():
+        logging.warning(f'NATR calculation resulted in NaN values. High, Low, Close data might be insufficient.')
+        logging.debug(f'High data: {high.tail()}')
+        logging.debug(f'Low data: {low.tail()}')
+        logging.debug(f'Close data: {close.tail()}')
+    
+    natr.fillna(0, inplace=True)  # Fill NaNs with 0 to avoid issues
+
     return natr
 
-def check_kmlm_condition(kmlm_data, condition_days=20):
-    kmlm_data['SMA_20'] = kmlm_data['Close'].rolling(window=condition_days).mean()
-    last_price = kmlm_data['Close'].iloc[-1]
-    sma_20 = kmlm_data['SMA_20'].iloc[-1]
-    return last_price >= sma_20, last_price < sma_20
-
-def detect_signal(kmlm_data, historical_data, entry_conditions):
+def detect_signal(kmlm_data, historical_data):
     kmlm_price = kmlm_data['Close'].iloc[-1]
-    kmlm_sma_20 = kmlm_data['SMA_20'].iloc[-1]
+    kmlm_sma_20 = kmlm_data['moving_average'].iloc[-1]
 
     if kmlm_price < kmlm_sma_20:
         eligible_tickers = ['TQQQ', 'FNGU', 'SOXL']
-        logging.info(f'KMLM price {kmlm_price} is below SMA 20 {kmlm_sma_20}. Eligible tickers: {eligible_tickers}')
-    elif kmlm_price > kmlm_sma_20:
+        entry_signal = 'price<20SMA'
+    else:
         eligible_tickers = ['BIL', 'BTAL', 'SQQQ', 'BITI']
-        logging.info(f'KMLM price {kmlm_price} is above SMA 20 {kmlm_sma_20}. Eligible tickers: {eligible_tickers}')
+        entry_signal = 'price>20SMA'
+
+    logging.info(f'Eligible Tickers: {eligible_tickers}')
 
     max_natr_ticker = None
     max_natr_value = -float('inf')
@@ -166,51 +128,22 @@ def detect_signal(kmlm_data, historical_data, entry_conditions):
     for ticker in eligible_tickers:
         if ticker in historical_data:
             natr_value = historical_data[ticker]['natr'].iloc[-1]
-            logging.info(f'Checking NATR for {ticker}: {natr_value}')
+            if pd.isna(natr_value) or natr_value == 0:
+                logging.warning(f'NATR for ticker {ticker} is NaN or 0, skipping.')
+                continue
+            logging.info(f'Ticker: {ticker}, NATR: {natr_value}')
             if natr_value > max_natr_value:
                 max_natr_value = natr_value
                 max_natr_ticker = ticker
 
     if max_natr_ticker:
-        logging.info(f'Selected {max_natr_ticker} with highest NATR {max_natr_value}')
-        return 'BUY', max_natr_ticker
+        logging.info(f'Selected Ticker: {max_natr_ticker}, Entry Signal: {entry_signal}')
+        return 'BUY', max_natr_ticker, entry_signal
     else:
-        logging.info('No eligible ticker found')
-        return None, None
+        logging.info('No eligible ticker found.')
+        return None, None, None
 
-def fetch_historical_data(ticker, start_date, end_date):
-    try:
-        start_date = datetime.strptime(start_date, '%Y-%m-%d')
-        end_date = datetime.strptime(end_date, '%Y-%m-%d')
-        delta = timedelta(days=7)
-        historical_data = pd.DataFrame()
-
-        logging.info(f'Fetching historical data for {ticker} from {start_date} to {end_date}')
-        while start_date < end_date:
-            chunk_end_date = min(start_date + delta, end_date)
-            logging.info(f'Fetching chunk from {start_date} to {chunk_end_date}')
-            stock = yf.Ticker(ticker)
-            hist = stock.history(start=start_date, end=chunk_end_date, interval="1d")  # Adjusted to 1-day interval
-            if not hist.empty:
-                hist = hist.reset_index()  # Reset the index to ensure unique indices
-                historical_data = pd.concat([historical_data, hist], ignore_index=True)
-            start_date += delta
-
-        if historical_data.empty:
-            logging.error(f'No historical data available for {ticker} from {start_date} to {end_date}')
-            return None
-
-        historical_data['moving_average'] = calculate_sma(historical_data, 20)
-        historical_data['atr'] = calculate_atr(historical_data, 14)
-        historical_data['natr'] = calculate_natr(historical_data)  # NATR calculation
-        save_intraday_data_to_postgres(ticker, historical_data)
-        logging.info(f'Fetched historical data for {ticker}: {historical_data.iloc[-1]}')
-        return historical_data
-    except Exception as e:
-        logging.error(f'Error fetching historical data for {ticker}: {e}')
-        return None
-
-def execute_trade(ticker, signal, current_price, event_time, limit_percent=None):
+def execute_trade(ticker, signal, current_price, date, trade_log, equity_usage, limit_percent):
     try:
         notional_value = round(100000 * equity_usage, 2)
         quantity = 0
@@ -219,99 +152,156 @@ def execute_trade(ticker, signal, current_price, event_time, limit_percent=None)
             if limit_percent:
                 limit_price = round(current_price * (1 + limit_percent))
                 quantity = math.ceil(notional_value / limit_price)
-                logging.info(f'{ticker} - Simulated LIMIT BUY order at {event_time}: Price: {limit_price}, Quantity: {quantity}, Equity Used: {equity_usage * 100}%')
-                save_to_postgres(ticker, 'LIMIT BUY', limit_price, event_time, order_type='limit', quantity=quantity, equity_used=equity_usage)
+                logging.info(f'{ticker} - Simulated LIMIT BUY order at {date}: Price: {limit_price}, Quantity: {quantity}, Equity Used: {equity_usage * 100}%')
             else:
                 rounded_price = round(current_price)
                 quantity = math.ceil(notional_value / rounded_price)
-                logging.info(f'{ticker} - Simulated MARKET BUY order at {event_time}: Price: {rounded_price}, Quantity: {quantity}, Equity Used: {equity_usage * 100}%')
-                save_to_postgres(ticker, 'MARKET BUY', rounded_price, event_time, order_type='market', quantity=quantity, equity_used=equity_usage)
+                logging.info(f'{ticker} - Simulated MARKET BUY order at {date}: Price: {rounded_price}, Quantity: {quantity}, Equity Used: {equity_usage * 100}%')
+            trade_log.append({"symbol": ticker, "action": "BUY", "price": current_price, "entry_date": date, "shares": quantity})
         elif signal == 'SELL':
             rounded_price = round(current_price)
             sell_quantity = 1
-            logging.info(f'{ticker} - Simulated SELL order at {event_time}: Price: {rounded_price}, Quantity: {sell_quantity}, Equity Used: {equity_usage * 100}%')
-            save_to_postgres(ticker, 'SELL', rounded_price, event_time, order_type='market', quantity=sell_quantity, equity_used=equity_usage)
+            logging.info(f'{ticker} - Simulated SELL order at {date}: Price: {rounded_price}, Quantity: {sell_quantity}, Equity Used: {equity_usage * 100}%')
+            trade_log.append({"symbol": ticker, "action": "SELL", "price": current_price, "exit_date": date, "shares": sell_quantity})
     except Exception as e:
         logging.error(f'Error executing trade for {ticker}: {e}')
-        save_to_postgres(ticker, signal, current_price, event_time, order_type=None, quantity=None, equity_used=equity_usage, error_message=str(e))
 
-def handle_exit_conditions(trade_record, historical_data, kmlm_data, exit_conditions):
-    trade_date = trade_record['event_time']
-    trade_ticker = trade_record['ticker']
-    trade_price = trade_record['price']
-    trade_atr = trade_record['atr']
+class Strategy:
+    def __init__(self, start_date, end_date, equity_usage, limit_percent, order_type, mode, max_positions):
+        self.start_date = start_date
+        self.end_date = end_date
+        self.equity_usage = equity_usage
+        self.limit_percent = limit_percent
+        self.order_type = order_type
+        self.mode = mode
+        self.max_positions = max_positions
+        self.trade_log = []
 
-    current_date = datetime.now()
-    current_price = historical_data[trade_ticker]['Close'].iloc[-1]
-    kmlm_price = kmlm_data['Close'].iloc[-1]
-    kmlm_sma_20 = kmlm_data['SMA_20'].iloc[-1]
+    def fetch_historical_data(self, ticker):
+        return fetch_historical_data(ticker, self.start_date, self.end_date)
+   
+    def detect_signal(self, kmlm_data, historical_data):
+        return detect_signal(kmlm_data, historical_data)
 
-    if 'price@kmlm>sma(20)@kmlm' in exit_conditions and kmlm_price > kmlm_sma_20 and trade_ticker in ['TQQQ', 'FNGU', 'SOXL']:
-        logging.info(f'Exit condition met: KMLM price {kmlm_price} is above SMA 20 {kmlm_sma_20} for {trade_ticker}')
-        return True
-    elif 'price@kmlm<sma(20)@kmlm' in exit_conditions and kmlm_price < kmlm_sma_20 and trade_ticker in ['BIL', 'BTAL', 'SQQQ', 'BITI']:
-        logging.info(f'Exit condition met: KMLM price {kmlm_price} is below SMA 20 {kmlm_sma_20} for {trade_ticker}')
-        return True
-    elif 'Current price>Entry price + 3*14 day ATR' in exit_conditions and current_price > trade_price + 3 * trade_atr:
-        logging.info(f'Exit condition met: Current price {current_price} is above entry price {trade_price} + 3 * ATR {trade_atr}')
-        return True
-    elif 'Current price>Entry price*1.05' in exit_conditions and current_price > trade_price * 1.05:
-        logging.info(f'Exit condition met: Current price {current_price} is above entry price {trade_price} * 1.05')
-        return True
-    elif '5 days since entry' in exit_conditions and (current_date - trade_date).days >= 5:
-        logging.info(f'Exit condition met: 5 days since entry for {trade_ticker}')
-        return True
+    def execute_trade(self, ticker, signal, current_price, date):
+        return execute_trade(ticker, signal, current_price, date, self.trade_log, self.equity_usage, self.limit_percent)
 
-    return False
+    def log_positions(self, positions):
+        for position in positions:
+            logging.info(f'Ticker: {position["ticker"]}, Entry Date: {position["entry_date"]}, Entry Price: {position["entry_price"]}')
 
-def backtest(tickers, start_date, end_date, limit_percent):
-    kmlm_data = fetch_historical_data('KMLM', start_date, end_date)
-    if kmlm_data is None:
-        logging.error('Failed to fetch KMLM data. Exiting backtest.')
-        return
+class BacktestStrategy(Strategy):
+    def run(self):
+        kmlm_data = self.fetch_historical_data('KMLM')
+        if kmlm_data is None:
+            logging.error('Failed to fetch KMLM data. Exiting backtest.')
+            return
 
-    kmlm_above_sma, kmlm_below_sma = check_kmlm_condition(kmlm_data)
+        historical_data = {ticker: self.fetch_historical_data(ticker) for ticker in ['TQQQ', 'FNGU', 'SOXL', 'BTAL', 'BIL', 'SQQQ', 'BITI'] if self.fetch_historical_data(ticker) is not None}
 
-    eligible_tickers_above_sma = ['TQQQ', 'FNGU', 'SOXL']
-    eligible_tickers_below_sma = ['BIL', 'BTAL', 'SQQQ', 'BITI']
-
-    historical_data = {ticker: fetch_historical_data(ticker, start_date, end_date) for ticker in tickers if fetch_historical_data(ticker, start_date, end_date) is not None}
-
-    # Evaluate entry conditions and find the stock with the highest NATR
-    signal, max_natr_ticker = detect_signal(kmlm_data, historical_data, entry_conditions)
-
-    if signal:
-        logging.info(f'Signal detected for {max_natr_ticker}: {signal}')
-        max_natr_data = historical_data[max_natr_ticker]
-        position = 0
+        positions = []
         aggregate_pnl = 0.0
+        trade_records = []
 
-        for index, row in max_natr_data.iterrows():
-            logging.info(f'Processing data for {max_natr_ticker} at {index}')
-            data = {
-                'last_price': row['Close'],
-                'moving_average': row['moving_average'],
-                'atr': row['atr'],
-                'natr': row['natr']
-            }
-            signal, trigger_condition = detect_signal(kmlm_data, historical_data, entry_conditions)
-            if signal:
-                logging.info(f'Signal detected for {max_natr_ticker}: {signal} at {index}')
-                execute_trade(max_natr_ticker, signal, data['last_price'], index, limit_percent)
-                # Update position
-                if signal == 'BUY':
-                    position += math.ceil(row['Close'])
-                elif signal == 'SELL':
-                    pnl = math.ceil(position - row['Close'])
-                    position = 0
+        kmlm_dates = kmlm_data.index
+
+        for date in kmlm_dates:
+            kmlm_price = kmlm_data.loc[date, 'Close']
+            kmlm_sma_20 = kmlm_data.loc[date, 'moving_average']
+
+            # Exit logic
+            for position in positions[:]:
+                ticker = position['ticker']
+                ticker_data = historical_data[ticker]
+                if date not in ticker_data.index:
+                    continue
+                row = ticker_data.loc[date]
+
+                exit_signal, reason = self.check_exit_conditions(kmlm_data, date, row, position)
+                if exit_signal:
+                    self.execute_trade(ticker, 'SELL', row['Close'], date)
+                    pnl = (row['Close'] - position['entry_price']) * position['shares']
                     aggregate_pnl += pnl
-                    logging.info(f'PnL for {max_natr_ticker} at {index}: {pnl}')
-            else:
-                logging.info(f'No signal detected for {max_natr_ticker} at {index}')
+                    logging.info(f'PnL for {ticker} at {date}: {pnl}')
+                    trade_records.append({
+                        "symbol": ticker, "action": "SELL", "exit_signal": reason,
+                        "entry_date": position['entry_date'], "entry_price": position['entry_price'],
+                        "exit_date": date, "exit_price": row['Close'], "shares": position['shares'], "pnl": pnl
+                    })
+                    positions.remove(position)
 
-        logging.info(f'Aggregate PnL for {max_natr_ticker} from {start_date} to {end_date}: {math.ceil(aggregate_pnl)}')
+            self.log_positions(positions)
+
+            # Entry logic only if new positions are available
+            if len(positions) < self.max_positions:
+                signal, max_natr_ticker, entry_signal = self.detect_signal(
+                    kmlm_data.loc[:date],
+                    {ticker: df.loc[:date] for ticker, df in historical_data.items()}
+                )
+                if signal and max_natr_ticker:
+                    row = historical_data[max_natr_ticker].loc[date]
+                    self.execute_trade(max_natr_ticker, 'BUY', row['Close'], date)
+                    positions.append({
+                        "entry_date": date, "entry_price": row['Close'],
+                        "shares": 1, "entry_signal": entry_signal, "ticker": max_natr_ticker
+                    })
+                    trade_records.append({
+                        "symbol": max_natr_ticker, "action": "BUY",
+                        "entry_signal": entry_signal, "entry_date": date,
+                        "entry_price": row['Close'], "shares": 1
+                    })
+
+        logging.info(f'Aggregate PnL from {self.start_date} to {self.end_date}: {aggregate_pnl}')
+        self.generate_report(trade_records)
+
+    def check_exit_conditions(self, kmlm_data, date, row, position):
+        if position is None or 'ticker' not in position:
+            return False, None
+        kmlm_price = kmlm_data.loc[date]['Close']
+        kmlm_sma_20 = kmlm_data.loc[date]['moving_average']
+        current_price = row['Close']
+        entry_price = position['entry_price']
+        ticker = position['ticker']
+
+        exit_conditions = [
+            (kmlm_price > kmlm_sma_20) and (ticker in ['TQQQ', 'FNGU', 'SOXL']),
+            (kmlm_price < kmlm_sma_20) and (ticker in ['BIL', 'BTAL', 'SQQQ', 'BITI']),
+            (current_price >= entry_price + 3 * row['atr']),
+            (current_price >= entry_price * 1.05),
+            (date >= position['entry_date'] + timedelta(days=5))
+        ]
+
+        for i, condition in enumerate(exit_conditions):
+            if condition:
+                return True, f"Condition {i+1}"
+
+        return False, None
+
+    def generate_report(self, trades_log):
+        trades_log_df = pd.DataFrame(trades_log)
+        trades_log_df.to_csv('trades_log.csv', index=False)
+
+        trades_log_df['date'] = pd.to_datetime(trades_log_df.apply(
+            lambda row: row['exit_date'] if pd.notna(row['exit_date']) else row['entry_date'], axis=1
+        ))
+        trades_log_df.set_index('date', inplace=True)
+
+        trades_log_df['returns'] = trades_log_df['pnl'] / trades_log_df['entry_price'].abs()
+        returns = trades_log_df['returns'].dropna()
+        qs.reports.html(returns, output='report.html')
+        logging.info('QuantStats report generated.')
 
 if __name__ == "__main__":
     tickers = ['TQQQ', 'FNGU', 'SOXL', 'BTAL', 'BIL', 'SQQQ', 'BITI']
-    logging.info('Starting the backtesting script.')
-    backtest(tickers, start_date, end_date, limit_percent)
+
+    logging.info(f'Script started on Python {platform.python_version()}.')
+
+    if mode == 'backtest':
+        strategy = BacktestStrategy(start_date, end_date, equity_usage, limit_percent, order_type, mode, max_positions)
+        strategy.run()
+    elif mode == 'livetrade':
+        pass  # Implement live trading logic here
+    elif mode == 'simtrade':
+        pass  # Implement simulation trading logic here
+
+    logging.info('Script completed successfully.')
